@@ -46,6 +46,14 @@ def test_deactivate_site(client, auth, sample_site):
     assert site_id not in ids
 
 
+def test_deactivated_site_visible_with_flag(client, auth, sample_site):
+    site_id = sample_site["id"]
+    client.delete(f"/api/sites/{site_id}", headers=auth)
+    resp = client.get("/api/sites?active_only=false", headers=auth)
+    ids = [s["id"] for s in resp.json()]
+    assert site_id in ids
+
+
 def test_get_nonexistent_site_returns_404(client, auth):
     resp = client.get("/api/sites/9999", headers=auth)
     assert resp.status_code == 404
