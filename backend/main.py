@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 from database import engine, Base
-from routers import employees, sites, schedules, auth_router, dashboard
+from routers import employees, sites, schedules, auth_router, dashboard, reports
 import models
 
 Base.metadata.create_all(bind=engine)
@@ -24,6 +24,7 @@ app.include_router(employees.router)
 app.include_router(sites.router)
 app.include_router(schedules.router)
 app.include_router(dashboard.router)
+app.include_router(reports.router)
 
 FRONTEND = Path(__file__).parent.parent / "frontend"
 app.mount("/static", StaticFiles(directory=str(FRONTEND)), name="static")
