@@ -90,6 +90,8 @@ def test_clock_in_sets_shift_active(client, auth, sample_shift, sample_employee)
     }, headers=auth)
     assert resp.status_code == 200
     assert resp.json()["event_type"] == "in"
+    shift = client.get("/api/schedules?date_from=2026-06-01&date_to=2026-06-01", headers=auth).json()[0]
+    assert shift["status"] == "active"
 
 
 def test_clock_out_sets_shift_completed(client, auth, sample_shift, sample_employee):
@@ -101,3 +103,5 @@ def test_clock_out_sets_shift_completed(client, auth, sample_shift, sample_emplo
     }, headers=auth)
     assert resp.status_code == 200
     assert resp.json()["event_type"] == "out"
+    shift = client.get("/api/schedules?date_from=2026-06-01&date_to=2026-06-01", headers=auth).json()[0]
+    assert shift["status"] == "completed"
