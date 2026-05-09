@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Literal
 from database import get_db
 from auth import get_current_user
 import models
@@ -13,7 +13,7 @@ class ReportCreate(BaseModel):
     employee_id: int
     site_id: int
     shift_id: Optional[int] = None
-    report_type: str = "DAR"
+    report_type: Literal["DAR", "Incident", "Patrol"] = "DAR"
     date: str
     content: str
 
@@ -44,9 +44,9 @@ def list_reports(
     user=Depends(get_current_user),
 ):
     q = db.query(models.Report)
-    if employee_id:
+    if employee_id is not None:
         q = q.filter(models.Report.employee_id == employee_id)
-    if site_id:
+    if site_id is not None:
         q = q.filter(models.Report.site_id == site_id)
     if date_from:
         q = q.filter(models.Report.date >= date_from)
