@@ -1,0 +1,1897 @@
+# GSGI Workforce Platform — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build a security workforce management platform for GSGI LLC replacing TrackTik — covering employees, sites, scheduling, clock-in/out, daily activity reports, and a real-time dashboard, with a luxury web UI and mobile-friendly guard clock-in.
+
+**Architecture:** FastAPI backend with SQLite (via SQLAlchemy), all served on `localhost:8000`; single-page HTML/JS frontend served as a static file by FastAPI itself; JWT auth with 8-hour tokens stored in `localStorage`. Guards access the same URL on mobile — no app store required.
+
+**Tech Stack:** Python 3.10, FastAPI 0.136, SQLAlchemy 2.0, SQLite, python-jose (JWT), passlib/bcrypt, pytest + httpx (tests), vanilla HTML/CSS/JS (frontend).
+
+---
+
+## Baseline State (read before starting)
+
+The backend at `/home/angelpino405/Desktop/gsgi-platform/backend/` is **already written and smoke-tested**. All routes respond correctly. Nothing has been committed — there is no git repo yet.
+
+**Working:** `database.py`, `models.py`, `auth.py`, `main.py`, `seed.py`, `routers/auth_router.py`, `routers/employees.py`, `routers/sites.py`, `routers/schedules.py`, `routers/dashboard.py`
+
+**Missing:** test suite, `routers/reports.py`, `frontend/index.html`, `start.sh`
+
+All tasks run from `cd /home/angelpino405/Desktop/gsgi-platform/backend` unless noted.
+
+---
+
+## File Map
+
+| File | Status | Responsibility |
+|------|--------|---------------|
+| `backend/database.py` | ✅ exists | SQLite engine, `get_db` dependency |
+| `backend/models.py` | ✅ exists | SQLAlchemy ORM: User, Employee, Site, Shift, ClockEvent, Report |
+| `backend/auth.py` | ✅ exists | JWT encode/decode, bcrypt, `get_current_user` dep |
+| `backend/main.py` | ✅ exists | FastAPI app, middleware, router registration, static file serve |
+| `backend/seed.py` | ✅ exists | Creates admin user `angel / gsgi2024!` |
+| `backend/routers/auth_router.py` | ✅ exists | POST /api/auth/token, /register, GET /me |
+| `backend/routers/employees.py` | ✅ exists | CRUD /api/employees |
+| `backend/routers/sites.py` | ✅ exists | CRUD /api/sites |
+| `backend/routers/schedules.py` | ✅ exists | CRUD /api/schedules, POST /api/schedules/clock/in, /clock/out |
+| `backend/routers/dashboard.py` | ✅ exists | GET /api/dashboard |
+| `backend/routers/reports.py` | ❌ missing | CRUD /api/reports (DAR, Incident) |
+| `backend/tests/conftest.py` | ❌ missing | pytest fixtures: in-memory DB, TestClient, auth headers |
+| `backend/tests/test_auth.py` | ❌ missing | Auth endpoint tests |
+| `backend/tests/test_employees.py` | ❌ missing | Employee CRUD tests |
+| `backend/tests/test_sites.py` | ❌ missing | Site CRUD tests |
+| `backend/tests/test_schedules.py` | ❌ missing | Shift + clock-in tests |
+| `backend/tests/test_reports.py` | ❌ missing | Report CRUD tests |
+| `backend/tests/test_dashboard.py` | ❌ missing | Dashboard stats tests |
+| `frontend/index.html` | ❌ missing | Full SPA: login, dashboard, employees, sites, schedule, reports |
+| `start.sh` | ❌ missing | Seeds DB, starts uvicorn, opens browser |
+
+---
+
+## Task 1: Git init + test infrastructure
+
+**Files:**
+- Create: `backend/tests/__init__.py`
+- Create: `backend/tests/conftest.py`
+- Create: `backend/pytest.ini`
+
+- [ ] **Step 1: Initialize git repo**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git init
+cat > .gitignore << 'EOF'
+__pycache__/
+*.pyc
+*.db
+.env
+*.egg-info/
+.pytest_cache/
+EOF
+git add .
+git commit -m "chore: initial project files"
+```
+
+Expected: `[main (root-commit) xxxxxxx] chore: initial project files`
+
+- [ ] **Step 2: Create test package**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+mkdir -p tests
+touch tests/__init__.py
+```
+
+- [ ] **Step 3: Create `backend/pytest.ini`**
+
+```ini
+[pytest]
+testpaths = tests
+pythonpath = .
+```
+
+- [ ] **Step 4: Create `backend/tests/conftest.py`**
+
+```python
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from database import Base, get_db
+from main import app
+
+TEST_DATABASE_URL = "sqlite:///./test_gsgi.db"
+engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def override_get_db():
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+app.dependency_overrides[get_db] = override_get_db
+
+
+@pytest.fixture(autouse=True)
+def reset_db():
+    Base.metadata.create_all(bind=engine)
+    yield
+    Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+@pytest.fixture
+def admin_token(client):
+    client.post("/api/auth/register", json={
+        "username": "angel", "email": "angel@gsgi.com",
+        "password": "gsgi2024!", "role": "admin"
+    })
+    resp = client.post("/api/auth/token", data={
+        "username": "angel", "password": "gsgi2024!"
+    })
+    return resp.json()["access_token"]
+
+
+@pytest.fixture
+def auth(admin_token):
+    return {"Authorization": f"Bearer {admin_token}"}
+
+
+@pytest.fixture
+def sample_employee(client, auth):
+    resp = client.post("/api/employees", json={
+        "first_name": "John", "last_name": "Smith",
+        "email": "john@gsgi.com", "license_type": "D",
+        "pay_rate": 18.50
+    }, headers=auth)
+    return resp.json()
+
+
+@pytest.fixture
+def sample_site(client, auth):
+    resp = client.post("/api/sites", json={
+        "name": "Bridgewater Bay", "client_name": "Bridgewater Bay POA",
+        "city": "Naples", "billing_rate": 25.0
+    }, headers=auth)
+    return resp.json()
+```
+
+- [ ] **Step 5: Verify test runner loads**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/ --collect-only
+```
+
+Expected output: `no tests ran` (no test files yet, but no import errors)
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add backend/tests/ backend/pytest.ini
+git commit -m "chore: add test infrastructure and conftest"
+```
+
+---
+
+## Task 2: Auth tests
+
+**Files:**
+- Create: `backend/tests/test_auth.py`
+
+- [ ] **Step 1: Write `backend/tests/test_auth.py`**
+
+```python
+def test_register_returns_user(client):
+    resp = client.post("/api/auth/register", json={
+        "username": "angel", "email": "angel@gsgi.com",
+        "password": "gsgi2024!", "role": "admin"
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["username"] == "angel"
+    assert data["role"] == "admin"
+    assert "hashed_password" not in data
+
+
+def test_duplicate_username_rejected(client):
+    payload = {"username": "angel", "email": "a@gsgi.com",
+               "password": "gsgi2024!", "role": "admin"}
+    client.post("/api/auth/register", json=payload)
+    resp = client.post("/api/auth/register", json=payload)
+    assert resp.status_code == 400
+
+
+def test_login_returns_token(client):
+    client.post("/api/auth/register", json={
+        "username": "angel", "email": "angel@gsgi.com",
+        "password": "gsgi2024!", "role": "admin"
+    })
+    resp = client.post("/api/auth/token", data={
+        "username": "angel", "password": "gsgi2024!"
+    })
+    assert resp.status_code == 200
+    assert "access_token" in resp.json()
+    assert resp.json()["token_type"] == "bearer"
+
+
+def test_wrong_password_returns_401(client):
+    client.post("/api/auth/register", json={
+        "username": "angel", "email": "angel@gsgi.com",
+        "password": "gsgi2024!", "role": "admin"
+    })
+    resp = client.post("/api/auth/token", data={
+        "username": "angel", "password": "wrongpass"
+    })
+    assert resp.status_code == 401
+
+
+def test_me_returns_current_user(client, auth):
+    resp = client.get("/api/auth/me", headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["username"] == "angel"
+    assert "hashed_password" not in resp.json()
+
+
+def test_protected_route_without_token_returns_401(client):
+    resp = client.get("/api/employees")
+    assert resp.status_code == 401
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/test_auth.py -v
+```
+
+Expected: `6 passed`
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add backend/tests/test_auth.py
+git commit -m "test: auth endpoints"
+```
+
+---
+
+## Task 3: Employee tests
+
+**Files:**
+- Create: `backend/tests/test_employees.py`
+
+- [ ] **Step 1: Write `backend/tests/test_employees.py`**
+
+```python
+def test_create_employee(client, auth):
+    resp = client.post("/api/employees", json={
+        "first_name": "John", "last_name": "Smith",
+        "email": "john@gsgi.com", "license_type": "D",
+        "license_number": "D123456", "license_expiry": "2026-12-31",
+        "pay_rate": 18.50
+    }, headers=auth)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["full_name"] == "John Smith"
+    assert data["license_type"] == "D"
+    assert data["is_active"] is True
+
+
+def test_list_employees_default_active_only(client, auth):
+    # Create two employees
+    for i in range(2):
+        client.post("/api/employees", json={
+            "first_name": f"Guard{i}", "last_name": "Test",
+            "email": f"guard{i}@gsgi.com", "license_type": "D"
+        }, headers=auth)
+    resp = client.get("/api/employees", headers=auth)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+
+def test_duplicate_email_rejected(client, auth):
+    payload = {"first_name": "A", "last_name": "B",
+               "email": "dup@gsgi.com", "license_type": "D"}
+    client.post("/api/employees", json=payload, headers=auth)
+    resp = client.post("/api/employees", json=payload, headers=auth)
+    assert resp.status_code == 400
+
+
+def test_get_employee_by_id(client, auth, sample_employee):
+    emp_id = sample_employee["id"]
+    resp = client.get(f"/api/employees/{emp_id}", headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["id"] == emp_id
+
+
+def test_update_employee(client, auth, sample_employee):
+    emp_id = sample_employee["id"]
+    resp = client.put(f"/api/employees/{emp_id}",
+                      json={"pay_rate": 22.0, "license_type": "G"},
+                      headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["pay_rate"] == 22.0
+    assert resp.json()["license_type"] == "G"
+
+
+def test_deactivate_employee_hides_from_list(client, auth, sample_employee):
+    emp_id = sample_employee["id"]
+    client.delete(f"/api/employees/{emp_id}", headers=auth)
+    resp = client.get("/api/employees", headers=auth)
+    ids = [e["id"] for e in resp.json()]
+    assert emp_id not in ids
+
+
+def test_deactivated_employee_visible_with_flag(client, auth, sample_employee):
+    emp_id = sample_employee["id"]
+    client.delete(f"/api/employees/{emp_id}", headers=auth)
+    resp = client.get("/api/employees?active_only=false", headers=auth)
+    ids = [e["id"] for e in resp.json()]
+    assert emp_id in ids
+
+
+def test_get_nonexistent_employee_returns_404(client, auth):
+    resp = client.get("/api/employees/9999", headers=auth)
+    assert resp.status_code == 404
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/test_employees.py -v
+```
+
+Expected: `8 passed`
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add backend/tests/test_employees.py
+git commit -m "test: employee CRUD endpoints"
+```
+
+---
+
+## Task 4: Site tests
+
+**Files:**
+- Create: `backend/tests/test_sites.py`
+
+- [ ] **Step 1: Write `backend/tests/test_sites.py`**
+
+```python
+def test_create_site(client, auth):
+    resp = client.post("/api/sites", json={
+        "name": "Bridgewater Bay", "client_name": "Bridgewater Bay POA",
+        "address": "123 Main St", "city": "Naples", "state": "FL",
+        "zip_code": "34110", "billing_rate": 25.0, "requires_armed": False
+    }, headers=auth)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Bridgewater Bay"
+    assert data["city"] == "Naples"
+    assert data["is_active"] is True
+
+
+def test_list_sites(client, auth):
+    for i in range(3):
+        client.post("/api/sites", json={
+            "name": f"Site {i}", "client_name": f"Client {i}"
+        }, headers=auth)
+    resp = client.get("/api/sites", headers=auth)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 3
+
+
+def test_get_site_by_id(client, auth, sample_site):
+    site_id = sample_site["id"]
+    resp = client.get(f"/api/sites/{site_id}", headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["id"] == site_id
+
+
+def test_update_site_post_orders(client, auth, sample_site):
+    site_id = sample_site["id"]
+    resp = client.put(f"/api/sites/{site_id}",
+                      json={"post_orders": "Check all gates hourly.", "requires_armed": True},
+                      headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["post_orders"] == "Check all gates hourly."
+    assert resp.json()["requires_armed"] is True
+
+
+def test_deactivate_site(client, auth, sample_site):
+    site_id = sample_site["id"]
+    client.delete(f"/api/sites/{site_id}", headers=auth)
+    resp = client.get("/api/sites", headers=auth)
+    ids = [s["id"] for s in resp.json()]
+    assert site_id not in ids
+
+
+def test_get_nonexistent_site_returns_404(client, auth):
+    resp = client.get("/api/sites/9999", headers=auth)
+    assert resp.status_code == 404
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/test_sites.py -v
+```
+
+Expected: `6 passed`
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add backend/tests/test_sites.py
+git commit -m "test: site CRUD endpoints"
+```
+
+---
+
+## Task 5: Schedule + clock tests
+
+**Files:**
+- Create: `backend/tests/test_schedules.py`
+
+- [ ] **Step 1: Write `backend/tests/test_schedules.py`**
+
+```python
+import pytest
+
+
+@pytest.fixture
+def sample_shift(client, auth, sample_employee, sample_site):
+    resp = client.post("/api/schedules", json={
+        "site_id": sample_site["id"],
+        "employee_id": sample_employee["id"],
+        "date": "2026-06-01",
+        "start_time": "08:00",
+        "end_time": "16:00"
+    }, headers=auth)
+    return resp.json()
+
+
+def test_create_shift(client, auth, sample_employee, sample_site):
+    resp = client.post("/api/schedules", json={
+        "site_id": sample_site["id"],
+        "employee_id": sample_employee["id"],
+        "date": "2026-06-01",
+        "start_time": "08:00",
+        "end_time": "16:00"
+    }, headers=auth)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["employee_name"] == "John Smith"
+    assert data["site_name"] == "Bridgewater Bay"
+    assert data["status"] == "scheduled"
+
+
+def test_create_open_shift_no_employee(client, auth, sample_site):
+    resp = client.post("/api/schedules", json={
+        "site_id": sample_site["id"],
+        "date": "2026-06-01",
+        "start_time": "08:00",
+        "end_time": "16:00"
+    }, headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["employee_name"] == "OPEN"
+
+
+def test_list_open_shifts(client, auth, sample_site):
+    client.post("/api/schedules", json={
+        "site_id": sample_site["id"],
+        "date": "2026-06-01", "start_time": "08:00", "end_time": "16:00"
+    }, headers=auth)
+    resp = client.get("/api/schedules/open", headers=auth)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+def test_list_shifts_filter_by_date(client, auth, sample_site, sample_employee):
+    for d in ["2026-06-01", "2026-06-02", "2026-07-01"]:
+        client.post("/api/schedules", json={
+            "site_id": sample_site["id"], "employee_id": sample_employee["id"],
+            "date": d, "start_time": "08:00", "end_time": "16:00"
+        }, headers=auth)
+    resp = client.get("/api/schedules?date_from=2026-06-01&date_to=2026-06-30", headers=auth)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+
+def test_update_shift_assigns_employee(client, auth, sample_site, sample_employee):
+    shift_resp = client.post("/api/schedules", json={
+        "site_id": sample_site["id"],
+        "date": "2026-06-01", "start_time": "08:00", "end_time": "16:00"
+    }, headers=auth)
+    shift_id = shift_resp.json()["id"]
+    resp = client.put(f"/api/schedules/{shift_id}",
+                      json={"employee_id": sample_employee["id"]},
+                      headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["employee_name"] == "John Smith"
+
+
+def test_cancel_shift(client, auth, sample_shift):
+    shift_id = sample_shift["id"]
+    resp = client.delete(f"/api/schedules/{shift_id}", headers=auth)
+    assert resp.status_code == 200
+    shifts = client.get(f"/api/schedules?date_from=2026-06-01&date_to=2026-06-01", headers=auth)
+    statuses = [s["status"] for s in shifts.json()]
+    assert "cancelled" in statuses
+
+
+def test_clock_in_sets_shift_active(client, auth, sample_shift, sample_employee):
+    resp = client.post("/api/schedules/clock/in", json={
+        "employee_id": sample_employee["id"],
+        "shift_id": sample_shift["id"],
+        "latitude": 26.142, "longitude": -81.795
+    }, headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["event_type"] == "in"
+
+
+def test_clock_out_sets_shift_completed(client, auth, sample_shift, sample_employee):
+    client.post("/api/schedules/clock/in", json={
+        "employee_id": sample_employee["id"], "shift_id": sample_shift["id"]
+    }, headers=auth)
+    resp = client.post("/api/schedules/clock/out", json={
+        "employee_id": sample_employee["id"], "shift_id": sample_shift["id"]
+    }, headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["event_type"] == "out"
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/test_schedules.py -v
+```
+
+Expected: `9 passed`
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add backend/tests/test_schedules.py
+git commit -m "test: schedule and clock-in/out endpoints"
+```
+
+---
+
+## Task 6: Reports router
+
+**Files:**
+- Create: `backend/routers/reports.py`
+- Modify: `backend/main.py` (add router import)
+- Create: `backend/tests/test_reports.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `backend/tests/test_reports.py`:
+
+```python
+import pytest
+
+
+@pytest.fixture
+def sample_report(client, auth, sample_employee, sample_site):
+    resp = client.post("/api/reports", json={
+        "employee_id": sample_employee["id"],
+        "site_id": sample_site["id"],
+        "report_type": "DAR",
+        "date": "2026-06-01",
+        "content": "All clear. Gates checked at 0800, 1200, 1600. No incidents."
+    }, headers=auth)
+    return resp.json()
+
+
+def test_create_dar(client, auth, sample_employee, sample_site):
+    resp = client.post("/api/reports", json={
+        "employee_id": sample_employee["id"],
+        "site_id": sample_site["id"],
+        "report_type": "DAR",
+        "date": "2026-06-01",
+        "content": "All clear. Gates checked at 0800, 1200, 1600."
+    }, headers=auth)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["report_type"] == "DAR"
+    assert data["employee_name"] == "John Smith"
+    assert data["site_name"] == "Bridgewater Bay"
+
+
+def test_create_incident_report(client, auth, sample_employee, sample_site):
+    resp = client.post("/api/reports", json={
+        "employee_id": sample_employee["id"],
+        "site_id": sample_site["id"],
+        "report_type": "Incident",
+        "date": "2026-06-01",
+        "content": "Vehicle break-in reported at north parking lot. Police notified."
+    }, headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["report_type"] == "Incident"
+
+
+def test_list_reports(client, auth, sample_employee, sample_site):
+    for i in range(3):
+        client.post("/api/reports", json={
+            "employee_id": sample_employee["id"],
+            "site_id": sample_site["id"],
+            "report_type": "DAR",
+            "date": f"2026-06-0{i+1}",
+            "content": f"Report {i}"
+        }, headers=auth)
+    resp = client.get("/api/reports", headers=auth)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 3
+
+
+def test_filter_reports_by_site(client, auth, sample_employee, sample_site):
+    client.post("/api/reports", json={
+        "employee_id": sample_employee["id"],
+        "site_id": sample_site["id"],
+        "report_type": "DAR", "date": "2026-06-01", "content": "All clear."
+    }, headers=auth)
+    resp = client.get(f"/api/reports?site_id={sample_site['id']}", headers=auth)
+    assert len(resp.json()) == 1
+
+
+def test_get_report_by_id(client, auth, sample_report):
+    report_id = sample_report["id"]
+    resp = client.get(f"/api/reports/{report_id}", headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["id"] == report_id
+
+
+def test_get_nonexistent_report_returns_404(client, auth):
+    resp = client.get("/api/reports/9999", headers=auth)
+    assert resp.status_code == 404
+```
+
+- [ ] **Step 2: Run test — verify it fails**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/test_reports.py -v 2>&1 | head -20
+```
+
+Expected: errors about `/api/reports` returning 404 (route doesn't exist yet)
+
+- [ ] **Step 3: Create `backend/routers/reports.py`**
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from typing import Optional
+from database import get_db
+from auth import get_current_user
+import models
+
+router = APIRouter(prefix="/api/reports", tags=["reports"])
+
+
+class ReportCreate(BaseModel):
+    employee_id: int
+    site_id: int
+    shift_id: Optional[int] = None
+    report_type: str = "DAR"
+    date: str
+    content: str
+
+
+def report_to_dict(r):
+    return {
+        "id": r.id,
+        "employee_id": r.employee_id,
+        "employee_name": f"{r.employee.first_name} {r.employee.last_name}" if r.employee else None,
+        "site_id": r.site_id,
+        "site_name": r.site.name if r.site else None,
+        "shift_id": r.shift_id,
+        "report_type": r.report_type,
+        "date": r.date,
+        "content": r.content,
+        "created_at": str(r.created_at),
+    }
+
+
+@router.get("")
+def list_reports(
+    employee_id: Optional[int] = None,
+    site_id: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    report_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    q = db.query(models.Report)
+    if employee_id:
+        q = q.filter(models.Report.employee_id == employee_id)
+    if site_id:
+        q = q.filter(models.Report.site_id == site_id)
+    if date_from:
+        q = q.filter(models.Report.date >= date_from)
+    if date_to:
+        q = q.filter(models.Report.date <= date_to)
+    if report_type:
+        q = q.filter(models.Report.report_type == report_type)
+    return [report_to_dict(r) for r in q.order_by(models.Report.date.desc()).all()]
+
+
+@router.post("")
+def create_report(data: ReportCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    emp = db.query(models.Employee).filter(models.Employee.id == data.employee_id).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    site = db.query(models.Site).filter(models.Site.id == data.site_id).first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    report = models.Report(**data.model_dump())
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    return report_to_dict(report)
+
+
+@router.get("/{report_id}")
+def get_report(report_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    report = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report_to_dict(report)
+```
+
+- [ ] **Step 4: Register router in `backend/main.py`**
+
+Add after the existing router imports (around line 4):
+
+```python
+from routers import employees, sites, schedules, auth_router, dashboard, reports
+```
+
+Add after the existing `app.include_router(dashboard.router)` line:
+
+```python
+app.include_router(reports.router)
+```
+
+- [ ] **Step 5: Run tests — verify all pass**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/test_reports.py -v
+```
+
+Expected: `6 passed`
+
+- [ ] **Step 6: Run full test suite**
+
+```bash
+pytest tests/ -v
+```
+
+Expected: all tests pass (auth + employees + sites + schedules + reports)
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add backend/routers/reports.py backend/main.py backend/tests/test_reports.py
+git commit -m "feat: reports router (DAR, Incident) with tests"
+```
+
+---
+
+## Task 7: Dashboard tests
+
+**Files:**
+- Create: `backend/tests/test_dashboard.py`
+
+- [ ] **Step 1: Write `backend/tests/test_dashboard.py`**
+
+```python
+from datetime import date
+
+
+def test_dashboard_empty_state(client, auth):
+    resp = client.get("/api/dashboard", headers=auth)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_employees"] == 0
+    assert data["total_sites"] == 0
+    assert data["today_shifts_total"] == 0
+
+
+def test_dashboard_counts_active_employees_and_sites(client, auth, sample_employee, sample_site):
+    resp = client.get("/api/dashboard", headers=auth)
+    data = resp.json()
+    assert data["total_employees"] == 1
+    assert data["total_sites"] == 1
+
+
+def test_dashboard_shows_todays_shifts(client, auth, sample_employee, sample_site):
+    today = date.today().isoformat()
+    client.post("/api/schedules", json={
+        "site_id": sample_site["id"],
+        "employee_id": sample_employee["id"],
+        "date": today, "start_time": "08:00", "end_time": "16:00"
+    }, headers=auth)
+    resp = client.get("/api/dashboard", headers=auth)
+    data = resp.json()
+    assert data["today_shifts_total"] == 1
+    assert data["today_shifts_covered"] == 1
+    assert data["today_shifts_open"] == 0
+
+
+def test_dashboard_shows_open_shifts(client, auth, sample_site):
+    today = date.today().isoformat()
+    client.post("/api/schedules", json={
+        "site_id": sample_site["id"],
+        "date": today, "start_time": "08:00", "end_time": "16:00"
+    }, headers=auth)
+    resp = client.get("/api/dashboard", headers=auth)
+    data = resp.json()
+    assert data["today_shifts_open"] == 1
+    assert data["today_shifts_covered"] == 0
+
+
+def test_dashboard_upcoming_shifts_list(client, auth, sample_employee, sample_site):
+    today = date.today().isoformat()
+    client.post("/api/schedules", json={
+        "site_id": sample_site["id"], "employee_id": sample_employee["id"],
+        "date": today, "start_time": "08:00", "end_time": "16:00"
+    }, headers=auth)
+    resp = client.get("/api/dashboard", headers=auth)
+    upcoming = resp.json()["upcoming_shifts"]
+    assert len(upcoming) >= 1
+    assert upcoming[0]["site"] == "Bridgewater Bay"
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/test_dashboard.py -v
+```
+
+Expected: `5 passed`
+
+- [ ] **Step 3: Run full suite**
+
+```bash
+pytest tests/ -v --tb=short
+```
+
+Expected: all 34+ tests pass with no failures.
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add backend/tests/test_dashboard.py
+git commit -m "test: dashboard stats endpoint"
+```
+
+---
+
+## Task 8: Frontend — Login + shell
+
+**Files:**
+- Create: `frontend/index.html` (login screen + app shell, no tabs yet)
+
+- [ ] **Step 1: Create `frontend/index.html` with login and auth flow**
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GSGI Workforce</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --gold: #C9A96E; --gold-light: #E8D5A8; --dark: #0A0A0A; --dark-2: #111;
+  --dark-3: #1A1A1A; --dark-4: #242424; --border: rgba(201,169,110,0.2);
+  --text: #F0EDE8; --muted: rgba(240,237,232,0.5); --red: #e05252; --green: #4caf50;
+}
+body { background: var(--dark); color: var(--text); font-family: 'Cormorant Garamond', serif; min-height: 100vh; }
+
+/* ── LOGIN ── */
+#loginScreen {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center, #1a1208 0%, var(--dark) 70%);
+}
+.login-box {
+  width: 380px; border: 1px solid var(--border); background: var(--dark-2); padding: 48px 40px;
+}
+.login-logo { text-align: center; margin-bottom: 36px; }
+.login-logo .mark { font-family: 'DM Mono', monospace; font-size: 28px; color: var(--gold); }
+.login-logo h1 { font-size: 22px; font-weight: 300; letter-spacing: 0.2em; text-transform: uppercase; margin-top: 8px; }
+.login-logo h1 span { color: var(--gold); }
+.field-label { font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; display: block; }
+.field { margin-bottom: 18px; }
+.field input {
+  width: 100%; background: var(--dark-3); border: 1px solid var(--border);
+  color: var(--text); font-family: 'Cormorant Garamond', serif; font-size: 16px;
+  padding: 12px 14px; outline: none; transition: border-color 0.2s;
+}
+.field input:focus { border-color: var(--gold); }
+.login-btn {
+  width: 100%; background: var(--gold); border: none; color: var(--dark);
+  font-family: 'DM Mono', monospace; font-size: 11px; letter-spacing: 0.15em;
+  text-transform: uppercase; padding: 14px; cursor: pointer; transition: background 0.2s;
+  margin-top: 8px;
+}
+.login-btn:hover { background: var(--gold-light); }
+.login-error { color: var(--red); font-size: 13px; text-align: center; margin-top: 12px; min-height: 18px; }
+
+/* ── APP SHELL ── */
+#appShell { display: none; flex-direction: column; min-height: 100vh; }
+.topbar {
+  background: var(--dark-2); border-bottom: 1px solid var(--border);
+  padding: 0 28px; display: flex; align-items: center; justify-content: space-between;
+  height: 56px; flex-shrink: 0;
+}
+.topbar-brand { display: flex; align-items: center; gap: 10px; }
+.topbar-mark { font-family: 'DM Mono', monospace; font-size: 13px; color: var(--gold); border: 1px solid var(--border); padding: 4px 8px; }
+.topbar-name { font-size: 16px; font-weight: 300; letter-spacing: 0.12em; text-transform: uppercase; }
+.topbar-name span { color: var(--gold); }
+.topbar-right { display: flex; align-items: center; gap: 16px; }
+.topbar-user { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); }
+.logout-btn {
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 6px 12px; cursor: pointer; transition: all 0.2s;
+}
+.logout-btn:hover { border-color: var(--red); color: var(--red); }
+
+.nav {
+  background: var(--dark-3); border-bottom: 1px solid var(--border);
+  display: flex; padding: 0 28px; overflow-x: auto; flex-shrink: 0;
+}
+.nav::-webkit-scrollbar { display: none; }
+.nav-btn {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-family: 'DM Mono', monospace; font-size: 10px;
+  letter-spacing: 0.1em; text-transform: uppercase; padding: 14px 18px;
+  cursor: pointer; transition: all 0.2s; white-space: nowrap;
+}
+.nav-btn:hover { color: var(--gold-light); }
+.nav-btn.active { color: var(--gold); border-bottom-color: var(--gold); }
+
+.content { flex: 1; padding: 28px; overflow-y: auto; }
+.page { display: none; }
+.page.active { display: block; }
+
+/* ── SHARED COMPONENTS ── */
+.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+.page-title { font-size: 26px; font-weight: 300; letter-spacing: 0.05em; }
+.page-title span { color: var(--gold); }
+.btn-primary {
+  background: var(--gold); border: none; color: var(--dark); font-family: 'DM Mono', monospace;
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 10px 20px;
+  cursor: pointer; transition: background 0.2s;
+}
+.btn-primary:hover { background: var(--gold-light); }
+.btn-ghost {
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 6px 14px; cursor: pointer; transition: all 0.2s;
+}
+.btn-ghost:hover { border-color: var(--gold); color: var(--gold); }
+.btn-danger {
+  background: transparent; border: 1px solid rgba(224,82,82,0.3); color: var(--red);
+  font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 6px 14px; cursor: pointer; transition: all 0.2s;
+}
+.btn-danger:hover { background: rgba(224,82,82,0.1); }
+
+.table-wrap { border: 1px solid var(--border); overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+th {
+  background: var(--dark-3); font-family: 'DM Mono', monospace; font-size: 9px;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+  padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border);
+}
+td { padding: 13px 16px; font-size: 15px; border-bottom: 1px solid rgba(201,169,110,0.07); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(201,169,110,0.04); }
+.badge {
+  display: inline-block; font-family: 'DM Mono', monospace; font-size: 9px;
+  letter-spacing: 0.06em; text-transform: uppercase; padding: 3px 8px; border-radius: 0;
+}
+.badge-active { background: rgba(76,175,80,0.15); color: #81c784; border: 1px solid rgba(76,175,80,0.3); }
+.badge-inactive { background: rgba(224,82,82,0.1); color: #e07070; border: 1px solid rgba(224,82,82,0.2); }
+.badge-open { background: rgba(255,167,38,0.1); color: #ffb74d; border: 1px solid rgba(255,167,38,0.2); }
+.badge-scheduled { background: rgba(201,169,110,0.1); color: var(--gold); border: 1px solid var(--border); }
+.badge-completed { background: rgba(76,175,80,0.1); color: #81c784; border: 1px solid rgba(76,175,80,0.2); }
+.badge-cancelled { background: rgba(224,82,82,0.1); color: #e07070; border: 1px solid rgba(224,82,82,0.2); }
+.badge-D { background: rgba(201,169,110,0.1); color: var(--gold-light); border: 1px solid var(--border); }
+.badge-G { background: rgba(100,160,255,0.1); color: #90caf9; border: 1px solid rgba(100,160,255,0.2); }
+.empty-state { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 15px; }
+
+/* ── MODAL ── */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+  display: none; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+  background: var(--dark-2); border: 1px solid var(--border);
+  width: 500px; max-width: 95vw; max-height: 90vh; overflow-y: auto;
+}
+.modal-header {
+  padding: 20px 24px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.modal-title { font-size: 18px; font-weight: 300; letter-spacing: 0.08em; }
+.modal-close { background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
+.modal-body { padding: 24px; display: grid; gap: 14px; }
+.modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+.form-field label { display: block; font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.form-field input, .form-field select, .form-field textarea {
+  width: 100%; background: var(--dark-3); border: 1px solid var(--border); color: var(--text);
+  font-family: 'Cormorant Garamond', serif; font-size: 15px; padding: 10px 12px; outline: none; transition: border-color 0.2s;
+}
+.form-field input:focus, .form-field select:focus, .form-field textarea:focus { border-color: var(--gold); }
+.form-field select option { background: var(--dark-3); }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+/* ── DASHBOARD ── */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 28px; }
+.stat-card { background: var(--dark-2); border: 1px solid var(--border); padding: 20px 22px; }
+.stat-label { font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; margin-bottom: 8px; }
+.stat-value { font-size: 36px; font-weight: 300; color: var(--gold); line-height: 1; }
+.stat-value.alert { color: var(--red); }
+.section-title { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; margin-bottom: 14px; }
+
+/* ── CLOCK IN/OUT ── */
+.clock-card {
+  background: var(--dark-2); border: 1px solid var(--gold); padding: 32px;
+  text-align: center; max-width: 400px; margin: 40px auto;
+}
+.clock-title { font-size: 22px; font-weight: 300; letter-spacing: 0.08em; margin-bottom: 24px; }
+.clock-btn {
+  width: 100%; padding: 18px; font-family: 'DM Mono', monospace; font-size: 12px;
+  letter-spacing: 0.15em; text-transform: uppercase; border: none; cursor: pointer;
+  transition: all 0.2s; font-size: 13px;
+}
+.clock-btn-in { background: rgba(76,175,80,0.2); color: #81c784; border: 1px solid rgba(76,175,80,0.4); margin-bottom: 12px; }
+.clock-btn-in:hover { background: rgba(76,175,80,0.35); }
+.clock-btn-out { background: rgba(224,82,82,0.15); color: #e07070; border: 1px solid rgba(224,82,82,0.3); }
+.clock-btn-out:hover { background: rgba(224,82,82,0.3); }
+.clock-status { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 16px; }
+
+/* ── TOAST ── */
+.toast {
+  position: fixed; bottom: 24px; right: 24px; z-index: 999;
+  background: var(--dark-3); border: 1px solid var(--border); border-left: 3px solid var(--gold);
+  padding: 14px 20px; font-size: 14px; max-width: 320px;
+  transform: translateY(80px); opacity: 0; transition: all 0.3s;
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.error { border-left-color: var(--red); }
+.toast.success { border-left-color: var(--green); }
+
+@media (max-width: 600px) {
+  .content { padding: 16px; }
+  .form-row { grid-template-columns: 1fr; }
+  .modal { width: 100%; max-height: 100vh; border-left: none; border-right: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginScreen">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="mark">GSGI</div>
+      <h1>Workforce <span>Platform</span></h1>
+    </div>
+    <div class="field">
+      <span class="field-label">Username</span>
+      <input type="text" id="loginUser" placeholder="angel" autocomplete="username">
+    </div>
+    <div class="field">
+      <span class="field-label">Password</span>
+      <input type="password" id="loginPass" placeholder="••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <button class="login-btn" onclick="doLogin()">Sign In</button>
+    <div class="login-error" id="loginError"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="appShell">
+  <div class="topbar">
+    <div class="topbar-brand">
+      <div class="topbar-mark">GSGI</div>
+      <div class="topbar-name">Workforce <span>Platform</span></div>
+    </div>
+    <div class="topbar-right">
+      <span class="topbar-user" id="topbarUser"></span>
+      <button class="logout-btn" onclick="doLogout()">Sign Out</button>
+    </div>
+  </div>
+  <div class="nav">
+    <button class="nav-btn active" onclick="showPage('dashboard',this)">Dashboard</button>
+    <button class="nav-btn" onclick="showPage('employees',this)">Employees</button>
+    <button class="nav-btn" onclick="showPage('sites',this)">Sites</button>
+    <button class="nav-btn" onclick="showPage('schedule',this)">Schedule</button>
+    <button class="nav-btn" onclick="showPage('reports',this)">Reports</button>
+    <button class="nav-btn" onclick="showPage('clockin',this)">Clock In/Out</button>
+  </div>
+  <div class="content">
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-header">
+        <div class="page-title">Good <span id="greeting"></span></div>
+      </div>
+      <div class="stat-grid" id="statGrid"></div>
+      <div class="section-title">Upcoming Shifts</div>
+      <div class="table-wrap">
+        <table><thead><tr>
+          <th>Date</th><th>Site</th><th>Guard</th><th>Start</th><th>End</th><th>Status</th>
+        </tr></thead>
+        <tbody id="upcomingShiftsBody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- EMPLOYEES -->
+    <div class="page" id="page-employees">
+      <div class="page-header">
+        <div class="page-title">Employees</div>
+        <button class="btn-primary" onclick="openEmpModal()">+ Add Employee</button>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr>
+          <th>Name</th><th>License</th><th>Phone</th><th>Pay Rate</th><th>Expiry</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody id="empBody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- SITES -->
+    <div class="page" id="page-sites">
+      <div class="page-header">
+        <div class="page-title">Sites <span>&amp;</span> Clients</div>
+        <button class="btn-primary" onclick="openSiteModal()">+ Add Site</button>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr>
+          <th>Site Name</th><th>Client</th><th>City</th><th>Armed</th><th>Bill Rate</th><th></th>
+        </tr></thead>
+        <tbody id="siteBody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- SCHEDULE -->
+    <div class="page" id="page-schedule">
+      <div class="page-header">
+        <div class="page-title">Schedule</div>
+        <button class="btn-primary" onclick="openShiftModal()">+ Add Shift</button>
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
+        <input type="date" id="schedDateFrom" style="background:var(--dark-3);border:1px solid var(--border);color:var(--text);padding:8px 12px;font-size:14px;outline:none;">
+        <input type="date" id="schedDateTo" style="background:var(--dark-3);border:1px solid var(--border);color:var(--text);padding:8px 12px;font-size:14px;outline:none;">
+        <button class="btn-ghost" onclick="loadSchedule()">Filter</button>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr>
+          <th>Date</th><th>Site</th><th>Guard</th><th>Hours</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody id="schedBody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- REPORTS -->
+    <div class="page" id="page-reports">
+      <div class="page-header">
+        <div class="page-title">Activity <span>Reports</span></div>
+        <button class="btn-primary" onclick="openReportModal()">+ New Report</button>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr>
+          <th>Date</th><th>Type</th><th>Site</th><th>Guard</th><th>Preview</th>
+        </tr></thead>
+        <tbody id="reportsBody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- CLOCK IN/OUT -->
+    <div class="page" id="page-clockin">
+      <div class="clock-card">
+        <div class="clock-title">Guard Clock In/Out</div>
+        <div class="form-field" style="margin-bottom:16px;text-align:left">
+          <label>Guard</label>
+          <select id="clockEmpSelect"></select>
+        </div>
+        <div class="form-field" style="margin-bottom:20px;text-align:left">
+          <label>Shift (optional)</label>
+          <select id="clockShiftSelect"><option value="">— No linked shift —</option></select>
+        </div>
+        <button class="clock-btn clock-btn-in" onclick="doClock('in')">▶ Clock In</button>
+        <button class="clock-btn clock-btn-out" onclick="doClock('out')">■ Clock Out</button>
+        <div class="clock-status" id="clockStatus"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- EMPLOYEE MODAL -->
+<div class="modal-backdrop" id="empModal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="empModalTitle">Add Employee</div>
+      <button class="modal-close" onclick="closeModal('empModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="empId">
+      <div class="form-row">
+        <div class="form-field"><label>First Name</label><input type="text" id="empFirst"></div>
+        <div class="form-field"><label>Last Name</label><input type="text" id="empLast"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label>Email</label><input type="email" id="empEmail"></div>
+        <div class="form-field"><label>Phone</label><input type="tel" id="empPhone"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label>License Type</label>
+          <select id="empLicense"><option value="D">Class D (Unarmed)</option><option value="G">Class G (Armed)</option><option value="D+G">Class D + G</option></select>
+        </div>
+        <div class="form-field"><label>License Number</label><input type="text" id="empLicNum"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label>License Expiry</label><input type="date" id="empLicExp"></div>
+        <div class="form-field"><label>Pay Rate ($/hr)</label><input type="number" step="0.01" id="empPay"></div>
+      </div>
+      <div class="form-field"><label>Hire Date</label><input type="date" id="empHire"></div>
+      <div class="form-field"><label>Notes</label><textarea id="empNotes" rows="3"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal('empModal')">Cancel</button>
+      <button class="btn-primary" onclick="saveEmployee()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- SITE MODAL -->
+<div class="modal-backdrop" id="siteModal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="siteModalTitle">Add Site</div>
+      <button class="modal-close" onclick="closeModal('siteModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="siteId">
+      <div class="form-row">
+        <div class="form-field"><label>Site Name</label><input type="text" id="siteName"></div>
+        <div class="form-field"><label>Client Name</label><input type="text" id="siteClient"></div>
+      </div>
+      <div class="form-field"><label>Address</label><input type="text" id="siteAddr"></div>
+      <div class="form-row">
+        <div class="form-field"><label>City</label><input type="text" id="siteCity"></div>
+        <div class="form-field"><label>Zip</label><input type="text" id="siteZip"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label>Contact Name</label><input type="text" id="siteContact"></div>
+        <div class="form-field"><label>Contact Phone</label><input type="tel" id="siteContactPh"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label>Billing Rate ($/hr)</label><input type="number" step="0.01" id="siteBill"></div>
+        <div class="form-field"><label>Armed Required</label>
+          <select id="siteArmed"><option value="false">No</option><option value="true">Yes</option></select>
+        </div>
+      </div>
+      <div class="form-field"><label>Post Orders</label><textarea id="sitePost" rows="4" placeholder="Standing orders for officers at this site..."></textarea></div>
+      <div class="form-field"><label>Notes</label><textarea id="siteNotes" rows="2"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal('siteModal')">Cancel</button>
+      <button class="btn-primary" onclick="saveSite()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- SHIFT MODAL -->
+<div class="modal-backdrop" id="shiftModal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="shiftModalTitle">Add Shift</div>
+      <button class="modal-close" onclick="closeModal('shiftModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="shiftId">
+      <div class="form-field"><label>Site</label><select id="shiftSite"></select></div>
+      <div class="form-field"><label>Guard (leave blank for open shift)</label><select id="shiftEmp"><option value="">— Open Shift —</option></select></div>
+      <div class="form-field"><label>Date</label><input type="date" id="shiftDate"></div>
+      <div class="form-row">
+        <div class="form-field"><label>Start Time</label><input type="time" id="shiftStart"></div>
+        <div class="form-field"><label>End Time</label><input type="time" id="shiftEnd"></div>
+      </div>
+      <div class="form-field"><label>Notes</label><textarea id="shiftNotes" rows="2"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal('shiftModal')">Cancel</button>
+      <button class="btn-primary" onclick="saveShift()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- REPORT MODAL -->
+<div class="modal-backdrop" id="reportModal">
+  <div class="modal" style="width:560px">
+    <div class="modal-header">
+      <div class="modal-title">New Report</div>
+      <button class="modal-close" onclick="closeModal('reportModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-field"><label>Guard</label><select id="repEmp"></select></div>
+        <div class="form-field"><label>Site</label><select id="repSite"></select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label>Report Type</label>
+          <select id="repType">
+            <option value="DAR">Daily Activity Report</option>
+            <option value="Incident">Incident Report</option>
+            <option value="Patrol">Patrol Log</option>
+          </select>
+        </div>
+        <div class="form-field"><label>Date</label><input type="date" id="repDate"></div>
+      </div>
+      <div class="form-field"><label>Report Content</label><textarea id="repContent" rows="8" placeholder="Describe activities, observations, incidents..."></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal('reportModal')">Cancel</button>
+      <button class="btn-primary" onclick="saveReport()">Submit Report</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('gsgi_token') || '';
+let currentUser = null;
+let allEmployees = [], allSites = [];
+
+function h(t) { return {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}; }
+
+async function api(method, path, body) {
+  const opts = { method, headers: h() };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(API + path, opts);
+  if (r.status === 401) { doLogout(); return null; }
+  return r.json();
+}
+
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + type;
+  setTimeout(() => el.className = 'toast', 3000);
+}
+
+function badge(text, cls) {
+  return `<span class="badge badge-${cls}">${text}</span>`;
+}
+
+// ── AUTH ──
+async function doLogin() {
+  const user = document.getElementById('loginUser').value;
+  const pass = document.getElementById('loginPass').value;
+  const form = new URLSearchParams();
+  form.append('username', user); form.append('password', pass);
+  const r = await fetch('/api/auth/token', { method: 'POST', body: form });
+  if (!r.ok) { document.getElementById('loginError').textContent = 'Invalid credentials.'; return; }
+  const data = await r.json();
+  token = data.access_token;
+  localStorage.setItem('gsgi_token', token);
+  currentUser = data;
+  bootApp();
+}
+
+function doLogout() {
+  localStorage.removeItem('gsgi_token');
+  token = ''; currentUser = null;
+  document.getElementById('appShell').style.display = 'none';
+  document.getElementById('loginScreen').style.display = 'flex';
+}
+
+async function bootApp() {
+  if (!token) return;
+  const me = await api('GET', '/api/auth/me');
+  if (!me) return;
+  currentUser = me;
+  document.getElementById('topbarUser').textContent = me.username.toUpperCase();
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appShell').style.display = 'flex';
+  const hr = new Date().getHours();
+  document.getElementById('greeting').textContent = hr < 12 ? 'Morning' : hr < 17 ? 'Afternoon' : 'Evening';
+  await refreshCache();
+  loadDashboard();
+}
+
+async function refreshCache() {
+  allEmployees = await api('GET', '/api/employees?active_only=true') || [];
+  allSites = await api('GET', '/api/sites?active_only=true') || [];
+}
+
+// ── NAV ──
+function showPage(name, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  if (btn) btn.classList.add('active');
+  const loaders = { dashboard: loadDashboard, employees: loadEmployees, sites: loadSites, schedule: loadSchedule, reports: loadReports, clockin: loadClockIn };
+  if (loaders[name]) loaders[name]();
+}
+
+// ── DASHBOARD ──
+async function loadDashboard() {
+  const d = await api('GET', '/api/dashboard');
+  if (!d) return;
+  const stats = [
+    { label: 'Active Guards', value: d.total_employees, alert: false },
+    { label: 'Active Sites', value: d.total_sites, alert: false },
+    { label: "Today's Shifts", value: d.today_shifts_total, alert: false },
+    { label: 'Open Today', value: d.today_shifts_open, alert: d.today_shifts_open > 0 },
+    { label: 'Active Now', value: d.active_shifts_now, alert: false },
+    { label: 'Open Next 7 Days', value: d.open_shifts_next_7_days, alert: d.open_shifts_next_7_days > 0 },
+  ];
+  document.getElementById('statGrid').innerHTML = stats.map(s =>
+    `<div class="stat-card"><div class="stat-label">${s.label}</div><div class="stat-value${s.alert?' alert':''}">${s.value}</div></div>`
+  ).join('');
+  const tbody = document.getElementById('upcomingShiftsBody');
+  if (!d.upcoming_shifts.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No upcoming shifts</td></tr>'; return; }
+  tbody.innerHTML = d.upcoming_shifts.map(s =>
+    `<tr><td>${s.date}</td><td>${s.site}</td><td>${s.employee}</td><td>${s.start_time}</td><td>${s.end_time}</td><td>${badge(s.status, s.status)}</td></tr>`
+  ).join('');
+}
+
+// ── EMPLOYEES ──
+async function loadEmployees() {
+  const emps = await api('GET', '/api/employees?active_only=false');
+  if (!emps) return;
+  const tbody = document.getElementById('empBody');
+  if (!emps.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No employees yet</td></tr>'; return; }
+  tbody.innerHTML = emps.map(e => `
+    <tr>
+      <td><strong>${e.full_name}</strong><br><small style="color:var(--muted);font-size:12px">${e.email}</small></td>
+      <td>${badge(e.license_type, e.license_type)}</td>
+      <td>${e.phone || '—'}</td>
+      <td>$${(e.pay_rate||0).toFixed(2)}/hr</td>
+      <td>${e.license_expiry || '—'}</td>
+      <td>${badge(e.is_active?'Active':'Inactive', e.is_active?'active':'inactive')}</td>
+      <td><button class="btn-ghost" onclick="editEmployee(${e.id})">Edit</button></td>
+    </tr>`).join('');
+}
+
+function openEmpModal(data) {
+  document.getElementById('empId').value = '';
+  ['empFirst','empLast','empEmail','empPhone','empLicNum','empLicExp','empPay','empHire','empNotes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('empLicense').value = 'D';
+  document.getElementById('empModalTitle').textContent = 'Add Employee';
+  if (data) {
+    document.getElementById('empId').value = data.id;
+    document.getElementById('empFirst').value = data.first_name || '';
+    document.getElementById('empLast').value = data.last_name || '';
+    document.getElementById('empEmail').value = data.email || '';
+    document.getElementById('empPhone').value = data.phone || '';
+    document.getElementById('empLicense').value = data.license_type || 'D';
+    document.getElementById('empLicNum').value = data.license_number || '';
+    document.getElementById('empLicExp').value = data.license_expiry || '';
+    document.getElementById('empPay').value = data.pay_rate || '';
+    document.getElementById('empHire').value = data.hire_date || '';
+    document.getElementById('empNotes').value = data.notes || '';
+    document.getElementById('empModalTitle').textContent = 'Edit Employee';
+  }
+  document.getElementById('empModal').classList.add('open');
+}
+
+async function editEmployee(id) {
+  const data = await api('GET', `/api/employees/${id}`);
+  if (data) openEmpModal(data);
+}
+
+async function saveEmployee() {
+  const id = document.getElementById('empId').value;
+  const payload = {
+    first_name: document.getElementById('empFirst').value,
+    last_name: document.getElementById('empLast').value,
+    email: document.getElementById('empEmail').value,
+    phone: document.getElementById('empPhone').value,
+    license_type: document.getElementById('empLicense').value,
+    license_number: document.getElementById('empLicNum').value,
+    license_expiry: document.getElementById('empLicExp').value,
+    pay_rate: parseFloat(document.getElementById('empPay').value) || 0,
+    hire_date: document.getElementById('empHire').value,
+    notes: document.getElementById('empNotes').value,
+  };
+  const result = id
+    ? await api('PUT', `/api/employees/${id}`, payload)
+    : await api('POST', '/api/employees', payload);
+  if (result && result.id) {
+    closeModal('empModal');
+    toast(id ? 'Employee updated.' : 'Employee added.', 'success');
+    await refreshCache();
+    loadEmployees();
+  } else { toast('Error saving employee.', 'error'); }
+}
+
+// ── SITES ──
+async function loadSites() {
+  const sites = await api('GET', '/api/sites?active_only=false');
+  if (!sites) return;
+  const tbody = document.getElementById('siteBody');
+  if (!sites.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No sites yet</td></tr>'; return; }
+  tbody.innerHTML = sites.map(s => `
+    <tr>
+      <td><strong>${s.name}</strong></td>
+      <td>${s.client_name}</td>
+      <td>${s.city || '—'}</td>
+      <td>${s.requires_armed ? badge('Armed','G') : badge('Unarmed','D')}</td>
+      <td>$${(s.billing_rate||0).toFixed(2)}/hr</td>
+      <td><button class="btn-ghost" onclick="editSite(${s.id})">Edit</button></td>
+    </tr>`).join('');
+}
+
+function openSiteModal(data) {
+  ['siteId','siteName','siteClient','siteAddr','siteCity','siteZip','siteContact','siteContactPh','siteBill','sitePost','siteNotes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('siteArmed').value = 'false';
+  document.getElementById('siteModalTitle').textContent = 'Add Site';
+  if (data) {
+    document.getElementById('siteId').value = data.id;
+    document.getElementById('siteName').value = data.name || '';
+    document.getElementById('siteClient').value = data.client_name || '';
+    document.getElementById('siteAddr').value = data.address || '';
+    document.getElementById('siteCity').value = data.city || '';
+    document.getElementById('siteZip').value = data.zip_code || '';
+    document.getElementById('siteContact').value = data.contact_name || '';
+    document.getElementById('siteContactPh').value = data.contact_phone || '';
+    document.getElementById('siteBill').value = data.billing_rate || '';
+    document.getElementById('siteArmed').value = data.requires_armed ? 'true' : 'false';
+    document.getElementById('sitePost').value = data.post_orders || '';
+    document.getElementById('siteNotes').value = data.notes || '';
+    document.getElementById('siteModalTitle').textContent = 'Edit Site';
+  }
+  document.getElementById('siteModal').classList.add('open');
+}
+
+async function editSite(id) {
+  const data = await api('GET', `/api/sites/${id}`);
+  if (data) openSiteModal(data);
+}
+
+async function saveSite() {
+  const id = document.getElementById('siteId').value;
+  const payload = {
+    name: document.getElementById('siteName').value,
+    client_name: document.getElementById('siteClient').value,
+    address: document.getElementById('siteAddr').value,
+    city: document.getElementById('siteCity').value,
+    zip_code: document.getElementById('siteZip').value,
+    contact_name: document.getElementById('siteContact').value,
+    contact_phone: document.getElementById('siteContactPh').value,
+    billing_rate: parseFloat(document.getElementById('siteBill').value) || 0,
+    requires_armed: document.getElementById('siteArmed').value === 'true',
+    post_orders: document.getElementById('sitePost').value,
+    notes: document.getElementById('siteNotes').value,
+  };
+  const result = id
+    ? await api('PUT', `/api/sites/${id}`, payload)
+    : await api('POST', '/api/sites', payload);
+  if (result && result.id) {
+    closeModal('siteModal');
+    toast(id ? 'Site updated.' : 'Site added.', 'success');
+    await refreshCache();
+    loadSites();
+  } else { toast('Error saving site.', 'error'); }
+}
+
+// ── SCHEDULE ──
+async function loadSchedule() {
+  const from = document.getElementById('schedDateFrom').value;
+  const to = document.getElementById('schedDateTo').value;
+  let url = '/api/schedules';
+  if (from || to) url += `?date_from=${from}&date_to=${to}`;
+  const shifts = await api('GET', url);
+  if (!shifts) return;
+  const tbody = document.getElementById('schedBody');
+  if (!shifts.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No shifts in this range</td></tr>'; return; }
+  tbody.innerHTML = shifts.map(s => {
+    const hrs = calcHours(s.start_time, s.end_time);
+    const empDisplay = s.employee_name === 'OPEN' ? badge('OPEN','open') : s.employee_name;
+    return `<tr>
+      <td>${s.date}</td><td>${s.site_name}</td><td>${empDisplay}</td>
+      <td>${hrs}h</td><td>${badge(s.status, s.status)}</td>
+      <td><button class="btn-danger" onclick="cancelShift(${s.id})">Cancel</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function calcHours(start, end) {
+  const [sh,sm] = start.split(':').map(Number);
+  const [eh,em] = end.split(':').map(Number);
+  let mins = (eh*60+em) - (sh*60+sm);
+  if (mins < 0) mins += 1440;
+  return (mins/60).toFixed(1);
+}
+
+async function cancelShift(id) {
+  if (!confirm('Cancel this shift?')) return;
+  await api('DELETE', `/api/schedules/${id}`);
+  toast('Shift cancelled.', 'success');
+  loadSchedule();
+}
+
+function openShiftModal() {
+  ['shiftId','shiftNotes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('shiftDate').value = new Date().toISOString().slice(0,10);
+  document.getElementById('shiftStart').value = '08:00';
+  document.getElementById('shiftEnd').value = '16:00';
+  const siteSelect = document.getElementById('shiftSite');
+  siteSelect.innerHTML = allSites.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  const empSelect = document.getElementById('shiftEmp');
+  empSelect.innerHTML = '<option value="">— Open Shift —</option>' + allEmployees.map(e => `<option value="${e.id}">${e.full_name}</option>`).join('');
+  document.getElementById('shiftModalTitle').textContent = 'Add Shift';
+  document.getElementById('shiftModal').classList.add('open');
+}
+
+async function saveShift() {
+  const payload = {
+    site_id: parseInt(document.getElementById('shiftSite').value),
+    date: document.getElementById('shiftDate').value,
+    start_time: document.getElementById('shiftStart').value,
+    end_time: document.getElementById('shiftEnd').value,
+    notes: document.getElementById('shiftNotes').value,
+  };
+  const empVal = document.getElementById('shiftEmp').value;
+  if (empVal) payload.employee_id = parseInt(empVal);
+  const result = await api('POST', '/api/schedules', payload);
+  if (result && result.id) {
+    closeModal('shiftModal');
+    toast('Shift created.', 'success');
+    loadSchedule();
+  } else { toast('Error creating shift.', 'error'); }
+}
+
+// ── REPORTS ──
+async function loadReports() {
+  const reps = await api('GET', '/api/reports');
+  if (!reps) return;
+  const tbody = document.getElementById('reportsBody');
+  if (!reps.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No reports yet</td></tr>'; return; }
+  tbody.innerHTML = reps.map(r => `
+    <tr>
+      <td>${r.date}</td>
+      <td>${badge(r.report_type, r.report_type==='DAR'?'scheduled':r.report_type==='Incident'?'cancelled':'active')}</td>
+      <td>${r.site_name}</td>
+      <td>${r.employee_name}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:14px">${r.content.slice(0,80)}…</td>
+    </tr>`).join('');
+}
+
+function openReportModal() {
+  document.getElementById('repDate').value = new Date().toISOString().slice(0,10);
+  document.getElementById('repContent').value = '';
+  document.getElementById('repType').value = 'DAR';
+  document.getElementById('repEmp').innerHTML = allEmployees.map(e => `<option value="${e.id}">${e.full_name}</option>`).join('');
+  document.getElementById('repSite').innerHTML = allSites.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  document.getElementById('reportModal').classList.add('open');
+}
+
+async function saveReport() {
+  const payload = {
+    employee_id: parseInt(document.getElementById('repEmp').value),
+    site_id: parseInt(document.getElementById('repSite').value),
+    report_type: document.getElementById('repType').value,
+    date: document.getElementById('repDate').value,
+    content: document.getElementById('repContent').value,
+  };
+  const result = await api('POST', '/api/reports', payload);
+  if (result && result.id) {
+    closeModal('reportModal');
+    toast('Report submitted.', 'success');
+    loadReports();
+  } else { toast('Error submitting report.', 'error'); }
+}
+
+// ── CLOCK IN/OUT ──
+async function loadClockIn() {
+  const sel = document.getElementById('clockEmpSelect');
+  sel.innerHTML = allEmployees.map(e => `<option value="${e.id}">${e.full_name}</option>`).join('');
+  const today = new Date().toISOString().slice(0,10);
+  const shifts = await api('GET', `/api/schedules?date_from=${today}&date_to=${today}`);
+  const shiftSel = document.getElementById('clockShiftSelect');
+  shiftSel.innerHTML = '<option value="">— No linked shift —</option>';
+  if (shifts) shifts.forEach(s => {
+    shiftSel.innerHTML += `<option value="${s.id}">${s.site_name} ${s.start_time}–${s.end_time}</option>`;
+  });
+}
+
+async function doClock(type) {
+  const empId = parseInt(document.getElementById('clockEmpSelect').value);
+  const shiftVal = document.getElementById('clockShiftSelect').value;
+  const payload = { employee_id: empId };
+  if (shiftVal) payload.shift_id = parseInt(shiftVal);
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(async pos => {
+      payload.latitude = pos.coords.latitude;
+      payload.longitude = pos.coords.longitude;
+      await submitClock(type, payload);
+    }, async () => { await submitClock(type, payload); });
+  } else { await submitClock(type, payload); }
+}
+
+async function submitClock(type, payload) {
+  const result = await api('POST', `/api/schedules/clock/${type}`, payload);
+  if (result && result.id) {
+    const ts = new Date().toLocaleTimeString();
+    document.getElementById('clockStatus').textContent = `Clocked ${type.toUpperCase()} at ${ts}`;
+    toast(`Clocked ${type.toUpperCase()} successfully.`, 'success');
+  } else { toast('Clock event failed.', 'error'); }
+}
+
+// ── MODAL ──
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.modal-backdrop').forEach(m => m.addEventListener('click', e => { if (e.target === m) m.classList.remove('open'); }));
+
+// ── INIT ──
+window.addEventListener('load', () => {
+  if (token) bootApp();
+  const today = new Date().toISOString().slice(0,10);
+  const nextWeek = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+  document.getElementById('schedDateFrom').value = today;
+  document.getElementById('schedDateTo').value = nextWeek;
+});
+</script>
+</body>
+</html>
+```
+
+- [ ] **Step 2: Start the server and verify the frontend loads**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+python3 seed.py
+uvicorn main:app --port 8000 --reload &
+sleep 2
+curl -s http://localhost:8000/ | grep -o '<title>[^<]*</title>'
+```
+
+Expected: `<title>GSGI Workforce</title>`
+
+- [ ] **Step 3: Test login via browser**
+
+Open `http://localhost:8000` in browser. Log in with `angel / gsgi2024!`. Verify dashboard loads with stat cards.
+
+Kill the test server: `pkill -f "uvicorn main:app"`
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add frontend/index.html backend/seed.py
+git commit -m "feat: full SPA frontend — dashboard, employees, sites, schedule, reports, clock-in"
+```
+
+---
+
+## Task 9: Start script + deployment
+
+**Files:**
+- Create: `start.sh`
+
+- [ ] **Step 1: Create `start.sh`**
+
+```bash
+#!/bin/bash
+set -e
+cd "$(dirname "$0")/backend"
+
+echo "── GSGI Workforce Platform ──"
+echo "Seeding database..."
+python3 seed.py
+
+echo "Starting server on http://localhost:8000"
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 &
+SERVER_PID=$!
+sleep 2
+
+if command -v xdg-open &> /dev/null; then
+  xdg-open http://localhost:8000
+fi
+
+echo "Server running (PID $SERVER_PID). Press Ctrl+C to stop."
+trap "kill $SERVER_PID; echo 'Server stopped.'" INT TERM
+wait $SERVER_PID
+```
+
+- [ ] **Step 2: Make executable and test**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+chmod +x start.sh
+bash start.sh &
+sleep 3
+curl -s http://localhost:8000/health
+pkill -f "uvicorn main:app"
+```
+
+Expected: `{"status":"ok","app":"GSGI Workforce Platform"}`
+
+- [ ] **Step 3: Run full test suite one final time**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform/backend
+pytest tests/ -v --tb=short
+```
+
+Expected: all tests pass.
+
+- [ ] **Step 4: Final commit**
+
+```bash
+cd /home/angelpino405/Desktop/gsgi-platform
+git add start.sh
+git commit -m "feat: start script with auto-seed and browser launch"
+```
+
+---
+
+## Self-Review
+
+### Spec coverage
+
+| Requirement | Covered by |
+|-------------|-----------|
+| Employee management (Class D/G licenses) | Task 3, 4, 8 |
+| Site/client management | Task 4, 5, 8 |
+| Scheduling / shift assignment | Task 5, 6, 8 |
+| Time & attendance with GPS clock-in/out | Task 6, 8 |
+| Daily activity reports | Task 6, 7, 8 |
+| Dashboard with live stats | Task 7, 8 |
+| Luxury UI aesthetic | Task 8 |
+| Mobile-friendly guard clock-in | Task 8 (responsive CSS + geolocation) |
+| Local desktop deployment | Task 9 |
+| Auth/login | Task 2, 8 |
+
+### Placeholder scan — none found. All steps contain actual code.
+
+### Type consistency
+- All router functions use `api('METHOD', '/api/...')` pattern consistently
+- `employee_id`, `site_id`, `shift_id` — consistent across all tasks
+- `full_name` computed field referenced in frontend — matches `employee_to_dict()` in `employees.py`
+- Badge classes (`active`, `inactive`, `open`, `scheduled`, `completed`, `cancelled`) — consistent between CSS and JS
+
+---
