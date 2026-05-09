@@ -1,11 +1,13 @@
 import pytest
+from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database import Base, get_db
 from main import app
 
-TEST_DATABASE_URL = "sqlite:///./test_gsgi.db"
+TEST_DB_PATH = Path(__file__).parent / "test_gsgi.db"
+TEST_DATABASE_URL = f"sqlite:///{TEST_DB_PATH}"
 engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
