@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
+import os
 from database import engine, Base
 from routers import employees, sites, schedules, auth_router, dashboard, reports
 import models
@@ -33,6 +34,16 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND)), name="static")
 @app.get("/", include_in_schema=False)
 def serve_frontend():
     return FileResponse(str(FRONTEND / "index.html"))
+
+
+@app.get("/manifest.json", include_in_schema=False)
+def serve_manifest():
+    return FileResponse(str(FRONTEND / "manifest.json"), media_type="application/manifest+json")
+
+
+@app.get("/icon.svg", include_in_schema=False)
+def serve_icon():
+    return FileResponse(str(FRONTEND / "icon.svg"), media_type="image/svg+xml")
 
 
 @app.get("/health")
