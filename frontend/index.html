@@ -126,6 +126,7 @@ tr:hover td { background: rgba(201,169,110,0.04); }
 .badge-cancelled { background: rgba(224,82,82,0.1); color: #e07070; border: 1px solid rgba(224,82,82,0.2); }
 .badge-D { background: rgba(201,169,110,0.1); color: var(--gold-light); border: 1px solid var(--border); }
 .badge-G { background: rgba(100,160,255,0.1); color: #90caf9; border: 1px solid rgba(100,160,255,0.2); }
+.badge-DG { background: rgba(100,160,255,0.1); color: #90caf9; border: 1px solid rgba(100,160,255,0.2); }
 .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 15px; }
 
 /* ── MODAL ── */
@@ -475,6 +476,11 @@ tr:hover td { background: rgba(201,169,110,0.04); }
 
 <script>
 const API = '';
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = String(s ?? '');
+  return d.innerHTML;
+}
 let token = localStorage.getItem('gsgi_token') || '';
 let currentUser = null;
 let allEmployees = [], allSites = [];
@@ -484,9 +490,15 @@ function h(t) { return {'Authorization': 'Bearer ' + token, 'Content-Type': 'app
 async function api(method, path, body) {
   const opts = { method, headers: h() };
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(API + path, opts);
-  if (r.status === 401) { doLogout(); return null; }
-  return r.json();
+  try {
+    const r = await fetch(API + path, opts);
+    if (r.status === 401) { doLogout(); return null; }
+    if (!r.ok) { toast(`Request failed (${r.status})`, 'error'); return null; }
+    return await r.json();
+  } catch (e) {
+    toast('Network error — server may be offline.', 'error');
+    return null;
+  }
 }
 
 function toast(msg, type = 'success') {
@@ -504,15 +516,20 @@ function badge(text, cls) {
 async function doLogin() {
   const user = document.getElementById('loginUser').value;
   const pass = document.getElementById('loginPass').value;
+  document.getElementById('loginError').textContent = '';
   const form = new URLSearchParams();
   form.append('username', user); form.append('password', pass);
-  const r = await fetch('/api/auth/token', { method: 'POST', body: form });
-  if (!r.ok) { document.getElementById('loginError').textContent = 'Invalid credentials.'; return; }
-  const data = await r.json();
-  token = data.access_token;
-  localStorage.setItem('gsgi_token', token);
-  currentUser = data;
-  bootApp();
+  try {
+    const r = await fetch('/api/auth/token', { method: 'POST', body: form });
+    if (!r.ok) { document.getElementById('loginError').textContent = 'Invalid credentials.'; return; }
+    const data = await r.json();
+    token = data.access_token;
+    localStorage.setItem('gsgi_token', token);
+    currentUser = data;
+    bootApp();
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'Cannot reach server.';
+  }
 }
 
 function doLogout() {
@@ -569,7 +586,7 @@ async function loadDashboard() {
   const tbody = document.getElementById('upcomingShiftsBody');
   if (!d.upcoming_shifts.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No upcoming shifts</td></tr>'; return; }
   tbody.innerHTML = d.upcoming_shifts.map(s =>
-    `<tr><td>${s.date}</td><td>${s.site}</td><td>${s.employee}</td><td>${s.start_time}</td><td>${s.end_time}</td><td>${badge(s.status, s.status)}</td></tr>`
+    `<tr><td>${esc(s.date)}</td><td>${esc(s.site)}</td><td>${esc(s.employee)}</td><td>${esc(s.start_time)}</td><td>${esc(s.end_time)}</td><td>${badge(esc(s.status), esc(s.status))}</td></tr>`
   ).join('');
 }
 
@@ -579,16 +596,19 @@ async function loadEmployees() {
   if (!emps) return;
   const tbody = document.getElementById('empBody');
   if (!emps.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No employees yet</td></tr>'; return; }
-  tbody.innerHTML = emps.map(e => `
+  tbody.innerHTML = emps.map(e => {
+    const licClass = e.license_type === 'D+G' ? 'DG' : e.license_type;
+    return `
     <tr>
-      <td><strong>${e.full_name}</strong><br><small style="color:var(--muted);font-size:12px">${e.email}</small></td>
-      <td>${badge(e.license_type, e.license_type)}</td>
-      <td>${e.phone || '—'}</td>
-      <td>$${(e.pay_rate||0).toFixed(2)}/hr</td>
-      <td>${e.license_expiry || '—'}</td>
+      <td><strong>${esc(e.full_name)}</strong><br><small style="color:var(--muted);font-size:12px">${esc(e.email)}</small></td>
+      <td>${badge(esc(e.license_type), licClass)}</td>
+      <td>${esc(e.phone || '—')}</td>
+      <td>$${esc((e.pay_rate||0).toFixed(2))}/hr</td>
+      <td>${esc(e.license_expiry || '—')}</td>
       <td>${badge(e.is_active?'Active':'Inactive', e.is_active?'active':'inactive')}</td>
       <td><button class="btn-ghost" onclick="editEmployee(${e.id})">Edit</button></td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 }
 
 function openEmpModal(data) {
@@ -651,11 +671,11 @@ async function loadSites() {
   if (!sites.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No sites yet</td></tr>'; return; }
   tbody.innerHTML = sites.map(s => `
     <tr>
-      <td><strong>${s.name}</strong></td>
-      <td>${s.client_name}</td>
-      <td>${s.city || '—'}</td>
+      <td><strong>${esc(s.name)}</strong></td>
+      <td>${esc(s.client_name)}</td>
+      <td>${esc(s.city || '—')}</td>
       <td>${s.requires_armed ? badge('Armed','G') : badge('Unarmed','D')}</td>
-      <td>$${(s.billing_rate||0).toFixed(2)}/hr</td>
+      <td>$${esc((s.billing_rate||0).toFixed(2))}/hr</td>
       <td><button class="btn-ghost" onclick="editSite(${s.id})">Edit</button></td>
     </tr>`).join('');
 }
@@ -725,10 +745,10 @@ async function loadSchedule() {
   if (!shifts.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No shifts in this range</td></tr>'; return; }
   tbody.innerHTML = shifts.map(s => {
     const hrs = calcHours(s.start_time, s.end_time);
-    const empDisplay = s.employee_name === 'OPEN' ? badge('OPEN','open') : s.employee_name;
+    const empDisplay = s.employee_name === 'OPEN' ? badge('OPEN','open') : esc(s.employee_name);
     return `<tr>
-      <td>${s.date}</td><td>${s.site_name}</td><td>${empDisplay}</td>
-      <td>${hrs}h</td><td>${badge(s.status, s.status)}</td>
+      <td>${esc(s.date)}</td><td>${esc(s.site_name)}</td><td>${empDisplay}</td>
+      <td>${hrs}h</td><td>${badge(esc(s.status), esc(s.status))}</td>
       <td><button class="btn-danger" onclick="cancelShift(${s.id})">Cancel</button></td>
     </tr>`;
   }).join('');
@@ -744,8 +764,8 @@ function calcHours(start, end) {
 
 async function cancelShift(id) {
   if (!confirm('Cancel this shift?')) return;
-  await api('DELETE', `/api/schedules/${id}`);
-  toast('Shift cancelled.', 'success');
+  const result = await api('DELETE', `/api/schedules/${id}`);
+  if (result !== null) toast('Shift cancelled.', 'success');
   loadSchedule();
 }
 
@@ -755,9 +775,9 @@ function openShiftModal() {
   document.getElementById('shiftStart').value = '08:00';
   document.getElementById('shiftEnd').value = '16:00';
   const siteSelect = document.getElementById('shiftSite');
-  siteSelect.innerHTML = allSites.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  siteSelect.innerHTML = allSites.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
   const empSelect = document.getElementById('shiftEmp');
-  empSelect.innerHTML = '<option value="">— Open Shift —</option>' + allEmployees.map(e => `<option value="${e.id}">${e.full_name}</option>`).join('');
+  empSelect.innerHTML = '<option value="">— Open Shift —</option>' + allEmployees.map(e => `<option value="${e.id}">${esc(e.full_name)}</option>`).join('');
   document.getElementById('shiftModalTitle').textContent = 'Add Shift';
   document.getElementById('shiftModal').classList.add('open');
 }
@@ -788,11 +808,11 @@ async function loadReports() {
   if (!reps.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No reports yet</td></tr>'; return; }
   tbody.innerHTML = reps.map(r => `
     <tr>
-      <td>${r.date}</td>
+      <td>${esc(r.date)}</td>
       <td>${badge(r.report_type, r.report_type==='DAR'?'scheduled':r.report_type==='Incident'?'cancelled':'active')}</td>
-      <td>${r.site_name}</td>
-      <td>${r.employee_name}</td>
-      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:14px">${r.content.slice(0,80)}…</td>
+      <td>${esc(r.site_name)}</td>
+      <td>${esc(r.employee_name)}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:14px">${esc(r.content.slice(0,80))}…</td>
     </tr>`).join('');
 }
 
@@ -800,8 +820,8 @@ function openReportModal() {
   document.getElementById('repDate').value = new Date().toISOString().slice(0,10);
   document.getElementById('repContent').value = '';
   document.getElementById('repType').value = 'DAR';
-  document.getElementById('repEmp').innerHTML = allEmployees.map(e => `<option value="${e.id}">${e.full_name}</option>`).join('');
-  document.getElementById('repSite').innerHTML = allSites.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  document.getElementById('repEmp').innerHTML = allEmployees.map(e => `<option value="${e.id}">${esc(e.full_name)}</option>`).join('');
+  document.getElementById('repSite').innerHTML = allSites.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
   document.getElementById('reportModal').classList.add('open');
 }
 
@@ -824,13 +844,13 @@ async function saveReport() {
 // ── CLOCK IN/OUT ──
 async function loadClockIn() {
   const sel = document.getElementById('clockEmpSelect');
-  sel.innerHTML = allEmployees.map(e => `<option value="${e.id}">${e.full_name}</option>`).join('');
+  sel.innerHTML = allEmployees.map(e => `<option value="${e.id}">${esc(e.full_name)}</option>`).join('');
   const today = new Date().toISOString().slice(0,10);
   const shifts = await api('GET', `/api/schedules?date_from=${today}&date_to=${today}`);
   const shiftSel = document.getElementById('clockShiftSelect');
   shiftSel.innerHTML = '<option value="">— No linked shift —</option>';
   if (shifts) shifts.forEach(s => {
-    shiftSel.innerHTML += `<option value="${s.id}">${s.site_name} ${s.start_time}–${s.end_time}</option>`;
+    shiftSel.innerHTML += `<option value="${s.id}">${esc(s.site_name)} ${esc(s.start_time)}–${esc(s.end_time)}</option>`;
   });
 }
 
