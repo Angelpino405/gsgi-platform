@@ -1,0 +1,2 @@
+# gsgi-platform
+Global Guard
